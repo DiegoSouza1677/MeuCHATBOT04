@@ -1,5 +1,6 @@
 import os
 import dotenv
+import json   
 import requests
 from flask import Flask, render_template, request, jsonify, session
 from datetime import datetime
@@ -27,7 +28,7 @@ def conversar_openai(mensagens, modelo='gpt-4o-mini'):
     Faz requisição para a API da OpenAI
     """
     API_KEY = os.getenv('OPENAI_API_KEY')
-
+    print(API_KEY)
     if not API_KEY:
         return {"error": {"message": "OPENAI_API_KEY não encontrada no arquivo .env"}}
 
@@ -55,6 +56,40 @@ def conversar_openai(mensagens, modelo='gpt-4o-mini'):
         return {"error": {"message": f"Erro na requisição: {str(e)}"}}
 
 print("✅ Função conversar_openai definida")
+def flowise_upsert(file_path, usage="exemplo", metadata=None):
+    """
+    Envia arquivos para indexação no Flowise (vector upsert)
+    """
+    url = os.getenv("FLOWISE_UPSERT_URL")
+    api_key = os.getenv("FLOWISE_API_KEY")
+
+    if not url:
+        return {"error": "FLOWISE_UPSERT_URL não configurada no .env"}
+
+    headers = {}
+
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Form-data file
+    form_data = {
+        "files": (os.path.basename(file_path), open(file_path, "rb"))
+    }
+
+    # Campos normais
+    body_data = {
+        "usage": usage,
+        "legacyBuild": "true",  # EM FORM-DATA sempre string
+        "metadata": json.dumps(metadata or {})  # também deve ser string
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, files=form_data, data=body_data)
+        resp.raise_for_status()
+        return resp.json()
+
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def criar_historico_inicial():
@@ -64,21 +99,9 @@ def criar_historico_inicial():
     hora_atual = datetime.now()
 
     system_prompt = (
-        f"Você é um atendente virtual de uma pizzaria. "
+        f"Você é um assistente juridico virtual"
+        f"formado em direito e com especialiadade em concurso publico na area juridico"
         f"Horário atual: {hora_atual.strftime('%H:%M')}. "
-        f"Regras: "
-        f"- Fale sempre em português "
-        f"- Seja educado e objetivo "
-        f"- Faça apenas uma pergunta por vez "
-        f"- Não crie promoções "
-        f"- Sempre confirme o pedido antes de finalizar "
-        f"- Se faltar alguma informação, pergunte e não suponha "
-        f"- O horário de funcionamento é das 10h às 23h "
-        f"- Pergunte o nome do cliente "
-        f"- Apresente o cardápio quando apropriado "
-        f"- Cardápio: Pizza Margherita (R$ 35), Pizza Calabresa (R$ 38), "
-        f"Pizza Portuguesa (R$ 40), Pizza 4 Queijos (R$ 42), "
-        f"Refrigerante (R$ 5), Suco Natural (R$ 8)"
     )
 
     return [{"role": "system", "content": system_prompt}]
@@ -100,6 +123,26 @@ def limitar_historico(mensagens, max_mensagens=20):
 print("✅ Função limitar_historico definida")
 
 # --- ROTAS ---
+@app.route('/enviar_arquivo', methods=['POST'])
+def enviar_arquivo():
+    if 'arquivo' not in request.files:
+        return jsonify({"status": "erro", "mensagem": "Nenhum arquivo enviado"}), 400
+
+    arquivo = request.files['arquivo']
+
+    caminho_temp = f"./{arquivo.filename}"
+    arquivo.save(caminho_temp)
+
+    resposta = flowise_upsert(
+        file_path=caminho_temp,
+        usage="documento_juridico",
+        metadata={"origem": "chatbot"}
+    )
+
+    # Remove o arquivo após o envio
+    os.remove(caminho_temp)
+
+    return jsonify(resposta)
 
 @app.route('/')
 def index():
