@@ -5,18 +5,22 @@
 {% block styles %}
 <style>
     #chat-window {
-        height: 400px;
+        height: 500px; /* um pouco mais alto para melhorar a visualização */
         overflow-y: auto;
         background-color: #fcfcfc;
         border: 1px solid #eee;
         border-radius: 8px;
         padding: 15px;
+        display: flex;
+        flex-direction: column;
     }
     .message {
         margin-bottom: 15px;
         padding: 10px 15px;
         border-radius: 15px;
         max-width: 80%;
+        word-wrap: break-word;
+        white-space: pre-wrap; /* preserva quebras de linha do texto da IA */
     }
     .user-message {
         background-color: #0d6efd;
@@ -51,7 +55,7 @@
             </div>
             
             <div class="card-body">
-                <div id="chat-window" class="mb-3 d-flex flex-column">
+                <div id="chat-window" class="mb-3">
                     <!-- Mensagens serão carregadas aqui -->
                 </div>
 
@@ -61,6 +65,7 @@
                         Enviar
                     </button>
                 </div>
+                <small id="status-text" class="text-muted d-block mt-2" style="min-height: 18px;"></small>
             </div>
         </div>
     </div>
@@ -72,9 +77,14 @@
     const chatWindow = document.getElementById('chat-window');
     const userInput = document.getElementById('user-input');
     const sendBtn = document.getElementById('send-btn');
+    const statusText = document.getElementById('status-text');
 
     // Chave para localStorage
     const STORAGE_KEY = 'chat_history';
+
+    function setStatus(text) {
+        statusText.textContent = text || '';
+    }
 
     // Função para salvar histórico no localStorage
     function saveHistory(message, isUser) {
@@ -91,12 +101,17 @@
         });
     }
 
+    function hasHistory() {
+        let history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+        return history.length > 0;
+    }
+
     // Função para adicionar mensagem na tela
     function addMessage(text, isUser, shouldSave = true) {
         const msgDiv = document.createElement('div');
         msgDiv.classList.add('message');
         msgDiv.classList.add(isUser ? 'user-message' : 'ai-message');
-        msgDiv.innerText = text;
+        msgDiv.textContent = text;
         chatWindow.appendChild(msgDiv);
         
         // Scroll automático para o final
@@ -129,6 +144,7 @@
     // Função para buscar mensagem inicial da IA
     async function getInitialMessage() {
         try {
+            setStatus('Carregando mensagem inicial...');
             const response = await fetch('/enviar_mensagem', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -137,7 +153,9 @@
 
             const data = await response.json();
             
-            if (data.resposta) {
+            if (data.error && data.error.message) {
+                addMessage("Erro: " + data.error.message, false);
+            } else if (data.resposta) {
                 addMessage(data.resposta, false);
             } else {
                 addMessage("Olá! Como posso ajudar?", false);
@@ -145,6 +163,8 @@
         } catch (error) {
             console.error('Erro ao buscar mensagem inicial:', error);
             addMessage("Olá! Como posso ajudar?", false);
+        } finally {
+            setStatus('');
         }
     }
 
@@ -155,6 +175,7 @@
         // Desabilita o botão para evitar envios duplicados
         sendBtn.disabled = true;
         userInput.disabled = true;
+        setStatus('Enviando mensagem...');
 
         // Limpa o input e mostra a mensagem do usuário
         userInput.value = '';
@@ -175,7 +196,9 @@
             // Remove o indicador de digitando
             removeTypingIndicator();
             
-            if (data.resposta) {
+            if (data.error && data.error.message) {
+                addMessage("Erro: " + data.error.message, false);
+            } else if (data.resposta) {
                 addMessage(data.resposta, false);
             } else {
                 addMessage("Erro: Não foi possível obter resposta.", false);
@@ -189,21 +212,29 @@
             sendBtn.disabled = false;
             userInput.disabled = false;
             userInput.focus();
+            setStatus('');
         }
     }
 
     // Eventos de clique e tecla Enter
     sendBtn.addEventListener('click', sendMessage);
     userInput.addEventListener('keypress', function (e) {
-        if (e.key === 'Enter') sendMessage();
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            sendMessage();
+        }
     });
 
-    // Ao carregar a página, sempre reinicia para manter sincronismo com a sessão Flask
+    // Ao carregar a página:
+    // - carrega histórico se existir
+    // - se não tiver histórico, busca saudação inicial da IA
     window.addEventListener('DOMContentLoaded', function() {
-        // Limpa o histórico local para sincronizar com a sessão do servidor
-        localStorage.removeItem(STORAGE_KEY);
-        // Busca mensagem inicial da IA
-        getInitialMessage();
+        if (hasHistory()) {
+            loadHistory();
+        } else {
+            getInitialMessage();
+        }
+        userInput.focus();
     });
 </script>
 {% endblock %}

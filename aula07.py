@@ -1,4 +1,5 @@
 import os
+import json
 import dotenv
 import requests
 from flask import Flask, render_template, request, jsonify, session
@@ -14,54 +15,49 @@ app = Flask(__name__)
 print("✅ App Flask criado")
 
 # Configurações - usa SECRET_KEY do .env ou gera uma aleatória
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24).hex())
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", os.urandom(24).hex())
 print("✅ SECRET_KEY configurada")
 
 # --- HELPERS ---
 
-
-def conversar_openai(mensagens, modelo='gpt-4o-mini'):
+def flowise_predict(question: str, chat_history=None, override_config=None):
     """
-    Faz requisição para a API da OpenAI com tratamento de erros.
-    Usa OPENAI_API_KEY do arquivo .env.
+    Faz requisição para o Flowise (/prediction) com tratamento de erros.
+    Usa FLOWISE_CHAT_URL e opcionalmente FLOWISE_API_KEY do .env.
     """
-    API_KEY = os.getenv('OPENAI_API_KEY')
+    url = os.getenv("FLOWISE_CHAT_URL")
+    api_key = os.getenv("FLOWISE_API_KEY")
 
-    if not API_KEY:
-        # Mantém o padrão que o restante do código espera: um dict com "error"
-        msg = "OPENAI_API_KEY não encontrada no arquivo .env"
+    if not url:
+        msg = "FLOWISE_CHAT_URL não encontrada no arquivo .env"
         print(f"❌ {msg}")
-        print("   -> Crie/edite o arquivo .env com: OPENAI_API_KEY=sua_chave_aqui")
         return {"error": {"message": msg}}
 
-    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
+    payload = {"question": question}
 
-    payload = {
-        "model": modelo,
-        "messages": mensagens,
-        "max_tokens": 300,
-        "temperature": 0.1
-    }
+    # Alguns fluxos suportam chatHistory / overrideConfig
+    if chat_history is not None:
+        payload["chatHistory"] = chat_history
+    if override_config is not None:
+        payload["overrideConfig"] = override_config
 
     try:
-        resposta = requests.post(url, json=payload, headers=headers, timeout=30)
-        resposta.raise_for_status()  # sobe exceção se HTTP != 2xx
-        return resposta.json()
+        resp = requests.post(url, json=payload, headers=headers, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
 
     except requests.exceptions.Timeout:
-        msg = "Timeout: A API demorou muito para responder"
+        msg = "Timeout: Flowise demorou muito para responder"
         print(f"❌ {msg}")
         return {"error": {"message": msg}}
 
     except requests.exceptions.HTTPError as e:
-        # Inclui corpo da resposta para debug
-        status = resposta.status_code if resposta is not None else "desconhecido"
-        corpo = resposta.text if resposta is not None else "sem corpo"
+        status = resp.status_code if resp is not None else "desconhecido"
+        corpo = resp.text if resp is not None else "sem corpo"
         msg = f"Erro HTTP {status}: {e} | Corpo: {corpo}"
         print(f"❌ {msg}")
         return {"error": {"message": msg}}
@@ -77,31 +73,67 @@ def conversar_openai(mensagens, modelo='gpt-4o-mini'):
         return {"error": {"message": msg}}
 
 
-print("✅ Função conversar_openai definida")
+def extract_flowise_text(data):
+    """
+    Normaliza a resposta do Flowise para texto.
+    """
+    if not data:
+        return None
+
+    if isinstance(data, dict):
+        if "text" in data and isinstance(data["text"], str):
+            return data["text"]
+        if "answer" in data and isinstance(data["answer"], str):
+            return data["answer"]
+        if "data" in data and isinstance(data["data"], str):
+            return data["data"]
+
+        # fallback
+        return json.dumps(data, ensure_ascii=False)
+
+    if isinstance(data, str):
+        return data
+
+    return str(data)
+
+
+print("✅ Função flowise_predict definida")
 
 
 def criar_historico_inicial():
     """
-    Cria o histórico inicial com a mensagem de sistema para cada nova sessão
+    Cria o histórico inicial com a mensagem de sistema para cada nova sessão.
+    OBS: o ideal é este prompt estar configurado no próprio Flowise.
     """
     hora_atual = datetime.now()
 
     system_prompt = (
-        f"Você é um atendente virtual de uma pizzaria. "
+        f"Você é um assistente jurídico virtual renomado, com mestrado em diversas "
+        f"disciplinas do Direito e especialista em concursos públicos da área jurídica. "
         f"Horário atual: {hora_atual.strftime('%H:%M')}. "
-        f"Regras: "
-        f"- Fale sempre em português "
-        f"- Seja educado e objetivo "
-        f"- Faça apenas uma pergunta por vez "
-        f"- Não crie promoções "
-        f"- Sempre confirme o pedido antes de finalizar "
-        f"- Se faltar alguma informação, pergunte e não suponha "
-        f"- O horário de funcionamento é das 10h às 23h "
-        f"- Pergunte o nome do cliente "
-        f"- Apresente o cardápio quando apropriado "
-        f"- Cardápio: Pizza Margherita (R$ 35), Pizza Calabresa (R$ 38), "
-        f"Pizza Portuguesa (R$ 40), Pizza 4 Queijos (R$ 42), "
-        f"Refrigerante (R$ 5), Suco Natural (R$ 8)"
+        f"Contexto: "
+        f"- Você auxilia em dúvidas jurídicas gerais, em estudos para concursos (como OAB "
+        f"e carreiras jurídicas) e na compreensão de temas de Direito. "
+        f"- Você NÃO substitui um advogado ou defensor público e deve sempre lembrar o "
+        f"usuário de buscar um profissional habilitado para casos concretos. "
+        f"Regras de atendimento: "
+        f"- Fale sempre em português brasileiro. "
+        f"- Seja extremamente claro, educado, profissional e objetivo. "
+        f"- Faça apenas uma pergunta por vez ao usuário. "
+        f"- Se faltar alguma informação relevante para a análise, pergunte e não suponha. "
+        f"- Quando a pergunta envolver caso concreto, responda em termos gerais, "
+        f"sem afirmar que aquela é a única solução, e recomende consulta a um profissional. "
+        f"- Quando a dúvida for de concurso público, identifique o nível do usuário "
+        f"(iniciante, intermediário, avançado) e o tipo de prova (objetiva, discursiva, peça) "
+        f"antes de sugerir estratégias de estudo. "
+        f"- Sempre organize a resposta em tópicos quando o assunto for complexo. "
+        f"- Cite a área do Direito envolvida (por exemplo, Direito Constitucional, "
+        f"Administrativo, Penal, Civil, Processo Penal, Processo Civil, Trabalho etc.) "
+        f"sempre que possível. "
+        f"- Evite jargões excessivos; quando usar termos técnicos, explique de forma simples. "
+        f"- Não invente artigos de lei ou súmulas; se não tiver certeza, diga que não tem "
+        f"certeza e oriente a conferência na legislação atualizada. "
+        f"- Nunca incentive práticas ilegais ou antiéticas em provas ou concursos. "
     )
 
     return [{"role": "system", "content": system_prompt}]
@@ -112,13 +144,13 @@ print("✅ Função criar_historico_inicial definida")
 
 def limitar_historico(mensagens, max_mensagens=20):
     """
-    Limita o histórico de mensagens para não exceder o limite da API.
+    Limita o histórico para não crescer demais.
     Sempre mantém a mensagem de sistema (índice 0).
     """
     if not mensagens:
         return criar_historico_inicial()
 
-    system_msg = mensagens[0]  # preserva o system prompt
+    system_msg = mensagens[0]
     restante = mensagens[1:]
     if len(restante) > max_mensagens:
         restante = restante[-max_mensagens:]
@@ -129,85 +161,59 @@ print("✅ Função limitar_historico definida")
 
 # --- ROTAS ---
 
-
-@app.route('/')
+@app.route("/")
 def index():
-    """Rota principal que carrega a interface do chatbot."""
-    session['historico'] = criar_historico_inicial()
-    return render_template('index.html')
+    session["historico"] = criar_historico_inicial()
+    return render_template("index.html")
 
 
 print("✅ Rota / definida")
 
 
-@app.route('/enviar_mensagem', methods=['POST'])
+@app.route("/enviar_mensagem", methods=["POST"])
 def enviar_mensagem():
-    """Processa mensagem do usuário e retorna resposta da IA"""
-    dados = request.get_json() or {}
-    mensagem_usuario = dados.get('mensagem', '').strip()
+    dados = request.get_json(silent=True) or {}
+    mensagem_usuario = (dados.get("mensagem") or "").strip()
 
     if not mensagem_usuario:
         return jsonify({"resposta": "Mensagem vazia", "status": "erro"}), 400
 
-    historico = session.get('historico')
-    if not historico:
-        historico = criar_historico_inicial()
+    historico = session.get("historico") or criar_historico_inicial()
 
-    # Adiciona mensagem do usuário ao histórico
+    # histórico local (para UI)
     historico.append({"role": "user", "content": mensagem_usuario})
-
-    # Limita o histórico
     historico = limitar_historico(historico)
 
-    # Chama a API da OpenAI
-    resposta_json = conversar_openai(mensagens=historico)
+    # Chama Flowise
+    resposta_json = flowise_predict(question=mensagem_usuario)
 
-    # Se veio um erro estruturado da função helper
-    if not resposta_json:
+    # erro estruturado
+    if isinstance(resposta_json, dict) and resposta_json.get("error"):
+        mensagem_erro = resposta_json["error"].get("message", "Erro desconhecido no Flowise")
         return jsonify({
-            "resposta": "Erro desconhecido ao chamar a IA.",
+            "resposta": f"Ops! Tive um problema: {mensagem_erro}",
             "status": "erro"
         }), 500
 
-    if 'choices' in resposta_json:
-        try:
-            texto_ia = resposta_json['choices'][0]['message']['content']
+    texto_ia = extract_flowise_text(resposta_json)
+    if not texto_ia:
+        return jsonify({
+            "resposta": "Não consegui obter resposta do Flowise.",
+            "status": "erro"
+        }), 500
 
-            # Adiciona resposta da IA ao histórico
-            historico.append({"role": "assistant", "content": texto_ia})
-            session['historico'] = historico
+    historico.append({"role": "assistant", "content": texto_ia})
+    session["historico"] = historico
 
-            return jsonify({
-                "resposta": texto_ia,
-                "status": "sucesso"
-            })
-
-        except (KeyError, IndexError, TypeError) as e:
-            print(f"Erro ao processar estrutura do JSON: {e}")
-            print(f"Resposta completa: {resposta_json}")
-            return jsonify({
-                "resposta": "Erro ao processar resposta da IA.",
-                "status": "erro"
-            }), 500
-
-    # Caso não tenha 'choices', tenta extrair mensagem de erro
-    mensagem_erro = resposta_json.get('error', {}).get('message', 'Erro desconhecido na API')
-    print(f"Falha na Resposta da API OpenAI: {mensagem_erro}")
-    print(f"Resposta completa: {resposta_json}")
-
-    return jsonify({
-        "resposta": f"Ops! Tive um problema: {mensagem_erro}",
-        "status": "erro"
-    }), 500
+    return jsonify({"resposta": texto_ia, "status": "sucesso"})
 
 
 print("✅ Rota /enviar_mensagem definida")
 
 
-@app.route('/limpar_historico', methods=['POST'])
+@app.route("/limpar_historico", methods=["POST"])
 def limpar_historico():
-    """Limpa o histórico da conversa e reinicia a sessão"""
-    session['historico'] = criar_historico_inicial()
+    session["historico"] = criar_historico_inicial()
     return jsonify({"status": "sucesso", "mensagem": "Histórico limpo"})
 
 
@@ -215,10 +221,9 @@ print("✅ Rota /limpar_historico definida")
 
 # --- TRATAMENTO DE ERROS ---
 
-
 @app.errorhandler(404)
 def page_not_found(e):
-    return render_template('index.html'), 404
+    return render_template("index.html"), 404
 
 
 @app.errorhandler(500)
@@ -228,15 +233,10 @@ def internal_error(e):
 
 print("✅ Error handlers definidos")
 
-print("🔥 Chegando no if __name__ == '__main__'...")
 
-
-if __name__ == '__main__':
-    print("🎯 Dentro do if __name__ == '__main__'")
-
-    if not os.getenv('OPENAI_API_KEY'):
-        print("⚠️  ATENÇÃO: OPENAI_API_KEY não encontrada no arquivo .env")
-        print("📝 Crie um arquivo .env com: OPENAI_API_KEY=sua_chave_aqui")
+if __name__ == "__main__":
+    if not os.getenv("FLOWISE_CHAT_URL"):
+        print("⚠️  ATENÇÃO: FLOWISE_CHAT_URL não encontrada no arquivo .env")
 
     print("🚀 Iniciando servidor Flask...")
     app.run(debug=True, port=5000)
